@@ -20,6 +20,8 @@ load_dotenv() # Load environment variables from .env file or Render's environmen
 TOKEN = os.environ.get('DISCORD_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 FLASK_SECRET_KEY = os.environ.get('FLASK_SECRET_KEY')
+# Render automatically provides this variable with the public URL of your web service
+RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
 
 # Check if the secrets are loaded correctly
 if not TOKEN:
@@ -28,6 +30,9 @@ if not DATABASE_URL:
     raise ValueError("CRITICAL ERROR: DATABASE_URL not found in environment variables.")
 if not FLASK_SECRET_KEY:
     raise ValueError("CRITICAL ERROR: FLASK_SECRET_KEY not found in environment variables.")
+if not RENDER_EXTERNAL_URL:
+    print("WARNING: RENDER_EXTERNAL_URL not found. Connection links may not work.")
+
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -132,10 +137,13 @@ def connect_google():
     
     session['user_id'] = user_id
 
+    # We need to construct the redirect_uri manually here as well
+    redirect_uri = f"{RENDER_EXTERNAL_URL}{url_for('oauth2callback')}"
+
     flow = Flow.from_client_secrets_file(
         'credentials.json',
         scopes=SCOPES,
-        redirect_uri=url_for('oauth2callback', _external=True)
+        redirect_uri=redirect_uri
     )
     authorization_url, state = flow.authorization_url(
         access_type='offline',
@@ -150,11 +158,13 @@ def oauth2callback():
     """Callback route for Google OAuth2. Finishes the process."""
     try:
         state = session['state']
+        redirect_uri = f"{RENDER_EXTERNAL_URL}{url_for('oauth2callback')}"
+
         flow = Flow.from_client_secrets_file(
             'credentials.json',
             scopes=SCOPES,
             state=state,
-            redirect_uri=url_for('oauth2callback', _external=True)
+            redirect_uri=redirect_uri
         )
         authorization_response = request.url
         flow.fetch_token(authorization_response=authorization_response)
@@ -186,8 +196,12 @@ async def on_message(message):
         return
 
     if message.content.startswith('!connect'):
-        # Generate the unique auth link for this user and send it in a DM
-        auth_url = url_for('connect_google', _external=True, user_id=message.author.id)
+        if not RENDER_EXTERNAL_URL:
+            await message.channel.send("Sorry, the connection service is not configured correctly by the bot admin.")
+            return
+
+        # Manually build the authentication URL
+        auth_url = f"{RENDER_EXTERNAL_URL}/connect_google?user_id={message.author.id}"
         try:
             await message.author.send(f"Please use this link to connect your Google Calendar: {auth_url}")
             await message.channel.send(f"{message.author.mention}, I've sent you a private message with your connection link.")
