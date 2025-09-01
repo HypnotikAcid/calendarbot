@@ -158,6 +158,7 @@ def oauth2callback():
     """Callback route for Google OAuth2. Finishes the process."""
     try:
         state = session['state']
+        # Construct the redirect_uri to match what was used in the connect_google route
         redirect_uri = f"{RENDER_EXTERNAL_URL}{url_for('oauth2callback')}"
 
         flow = Flow.from_client_secrets_file(
