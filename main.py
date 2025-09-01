@@ -10,17 +10,21 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 import psycopg2
 from dotenv import load_dotenv
+import logging
+import traceback
 
 # ==============================================================================
 # 1. BOT & SERVER SETUP (RENDER)
 # ==============================================================================
-load_dotenv() # Load environment variables from .env file or Render's environment
+# Configure logging to ensure we see all messages
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+load_dotenv()
 
 # Securely load secrets from Render's environment variables
 TOKEN = os.environ.get('DISCORD_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 FLASK_SECRET_KEY = os.environ.get('FLASK_SECRET_KEY')
-# Render automatically provides this variable with the public URL of your web service
 RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
 
 # Check if the secrets are loaded correctly
@@ -31,7 +35,7 @@ if not DATABASE_URL:
 if not FLASK_SECRET_KEY:
     raise ValueError("CRITICAL ERROR: FLASK_SECRET_KEY not found in environment variables.")
 if not RENDER_EXTERNAL_URL:
-    print("WARNING: RENDER_EXTERNAL_URL not found. Connection links may not work.")
+    logging.warning("RENDER_EXTERNAL_URL not found. Connection links may not work.")
 
 
 intents = discord.Intents.default()
@@ -67,15 +71,14 @@ def init_db():
         conn.commit()
         cur.close()
         conn.close()
-        print("Database initialized successfully.")
+        logging.info("Database initialized successfully.")
     except Exception as e:
-        print(f"Error initializing database: {e}")
+        logging.error(f"Error initializing database: {e}")
 
 def save_user_token(user_id, token_json):
     """Saves or updates a user's Google token in the database."""
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
-    # Use INSERT ... ON CONFLICT (user_id) DO UPDATE to handle both new and existing users
     cur.execute("""
         INSERT INTO google_tokens (user_id, token_json) VALUES (%s, %s)
         ON CONFLICT (user_id) DO UPDATE SET token_json = %s;
@@ -83,12 +86,11 @@ def save_user_token(user_id, token_json):
     conn.commit()
     cur.close()
     conn.close()
-    print(f"Successfully saved token for user {user_id}")
+    logging.info(f"Successfully saved token for user {user_id}")
 
 # ==============================================================================
 # 3. GOOGLE CALENDAR SETUP (MULTI-USER WITH POSTGRESQL)
 # ==============================================================================
-# Requesting full calendar access to allow for adding events later.
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 def get_calendar_service(user_id):
@@ -113,7 +115,7 @@ def get_calendar_service(user_id):
                 creds.refresh(Request())
                 save_user_token(user_id, creds.to_json())
             except Exception as e:
-                print(f"Could not refresh token for user {user_id}: {e}")
+                logging.error(f"Could not refresh token for user {user_id}: {e}")
                 cur.execute("DELETE FROM google_tokens WHERE user_id = %s;", (user_id,))
                 conn.commit()
                 cur.close()
@@ -136,8 +138,6 @@ def connect_google():
         return "<h1>Error: Missing user ID.</h1><p>Please try the `!connect` command again from Discord.</p>", 400
     
     session['user_id'] = user_id
-
-    # We need to construct the redirect_uri manually here as well
     redirect_uri = f"{RENDER_EXTERNAL_URL}{url_for('oauth2callback')}"
 
     flow = Flow.from_client_secrets_file(
@@ -148,7 +148,7 @@ def connect_google():
     authorization_url, state = flow.authorization_url(
         access_type='offline',
         include_granted_scopes='true',
-        prompt='consent' # Forces the refresh token to be sent every time
+        prompt='consent'
     )
     session['state'] = state
     return redirect(authorization_url)
@@ -158,7 +158,6 @@ def oauth2callback():
     """Callback route for Google OAuth2. Finishes the process."""
     try:
         state = session['state']
-        # Construct the redirect_uri to match what was used in the connect_google route
         redirect_uri = f"{RENDER_EXTERNAL_URL}{url_for('oauth2callback')}"
 
         flow = Flow.from_client_secrets_file(
@@ -180,7 +179,8 @@ def oauth2callback():
         
         return "<h1>Authentication successful!</h1><p>You can now close this window and use the `!events` command in Discord.</p>"
     except Exception as e:
-        print(f"An error occurred in the OAuth callback: {e}")
+        # This will now log the FULL traceback to the Render logs
+        logging.error(f"An error occurred in the OAuth callback:\n{traceback.format_exc()}")
         return "<h1>An error occurred during authentication.</h1><p>Please try again.</p>", 500
 
 # ==============================================================================
@@ -188,7 +188,7 @@ def oauth2callback():
 # ==============================================================================
 @client.event
 async def on_ready():
-    print(f'Success! We have logged in as {client.user}')
+    logging.info(f'Success! We have logged in as {client.user}')
     init_db()
 
 @client.event
@@ -201,7 +201,6 @@ async def on_message(message):
             await message.channel.send("Sorry, the connection service is not configured correctly by the bot admin.")
             return
 
-        # Manually build the authentication URL
         auth_url = f"{RENDER_EXTERNAL_URL}/connect_google?user_id={message.author.id}"
         try:
             await message.author.send(f"Please use this link to connect your Google Calendar: {auth_url}")
