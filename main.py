@@ -1,11 +1,12 @@
 import discord
 import os
-from flask import Flask
+from flask import Flask, request, redirect, session, url_for
 from threading import Thread
 import datetime
+import json
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 import psycopg2
 from dotenv import load_dotenv
@@ -18,18 +19,23 @@ load_dotenv() # Load environment variables from .env file or Render's environmen
 # Securely load secrets from Render's environment variables
 TOKEN = os.environ.get('DISCORD_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
+FLASK_SECRET_KEY = os.environ.get('FLASK_SECRET_KEY')
 
 # Check if the secrets are loaded correctly
 if not TOKEN:
-    raise ValueError("CRITICAL ERROR: DISCORD_TOKEN not found in environment variables. Go to the 'Environment' tab in Render and add it.")
+    raise ValueError("CRITICAL ERROR: DISCORD_TOKEN not found in environment variables.")
 if not DATABASE_URL:
-    raise ValueError("CRITICAL ERROR: DATABASE_URL not found in environment variables. Go to the 'Environment' tab in Render and add it.")
+    raise ValueError("CRITICAL ERROR: DATABASE_URL not found in environment variables.")
+if not FLASK_SECRET_KEY:
+    raise ValueError("CRITICAL ERROR: FLASK_SECRET_KEY not found in environment variables.")
 
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
 app = Flask('')
+app.secret_key = FLASK_SECRET_KEY
+
 @app.route('/')
 def home():
     return "Bot is alive!"
@@ -47,7 +53,6 @@ def init_db():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
-        # Create table if it doesn't exist
         cur.execute("""
             CREATE TABLE IF NOT EXISTS google_tokens (
                 user_id BIGINT PRIMARY KEY,
@@ -61,10 +66,25 @@ def init_db():
     except Exception as e:
         print(f"Error initializing database: {e}")
 
+def save_user_token(user_id, token_json):
+    """Saves or updates a user's Google token in the database."""
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+    # Use INSERT ... ON CONFLICT (user_id) DO UPDATE to handle both new and existing users
+    cur.execute("""
+        INSERT INTO google_tokens (user_id, token_json) VALUES (%s, %s)
+        ON CONFLICT (user_id) DO UPDATE SET token_json = %s;
+    """, (user_id, token_json, token_json))
+    conn.commit()
+    cur.close()
+    conn.close()
+    print(f"Successfully saved token for user {user_id}")
+
 # ==============================================================================
 # 3. GOOGLE CALENDAR SETUP (MULTI-USER WITH POSTGRESQL)
 # ==============================================================================
-SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
+# Requesting full calendar access to allow for adding events later.
+SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 def get_calendar_service(user_id):
     """Authenticates with Google for a specific user using tokens from PostgreSQL."""
@@ -79,8 +99,6 @@ def get_calendar_service(user_id):
         return None
 
     creds_json = result[0]
-    # Important: Convert the JSON string from the DB into a dictionary
-    import json
     creds_info = json.loads(creds_json)
     creds = Credentials.from_authorized_user_info(creds_info, SCOPES)
 
@@ -88,12 +106,7 @@ def get_calendar_service(user_id):
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
-                # Save the refreshed credentials back to the database
-                cur.execute(
-                    "UPDATE google_tokens SET token_json = %s WHERE user_id = %s;",
-                    (creds.to_json(), user_id)
-                )
-                conn.commit()
+                save_user_token(user_id, creds.to_json())
             except Exception as e:
                 print(f"Could not refresh token for user {user_id}: {e}")
                 cur.execute("DELETE FROM google_tokens WHERE user_id = %s;", (user_id,))
@@ -108,16 +121,78 @@ def get_calendar_service(user_id):
     return service
 
 # ==============================================================================
-# 4. BOT EVENTS
+# 4. WEB ROUTES FOR OAUTH
+# ==============================================================================
+@app.route('/connect_google')
+def connect_google():
+    """Initiates the Google OAuth2 flow."""
+    user_id = request.args.get('user_id')
+    if not user_id:
+        return "<h1>Error: Missing user ID.</h1><p>Please try the `!connect` command again from Discord.</p>", 400
+    
+    session['user_id'] = user_id
+
+    flow = Flow.from_client_secrets_file(
+        'credentials.json',
+        scopes=SCOPES,
+        redirect_uri=url_for('oauth2callback', _external=True)
+    )
+    authorization_url, state = flow.authorization_url(
+        access_type='offline',
+        include_granted_scopes='true',
+        prompt='consent' # Forces the refresh token to be sent every time
+    )
+    session['state'] = state
+    return redirect(authorization_url)
+
+@app.route('/oauth2callback')
+def oauth2callback():
+    """Callback route for Google OAuth2. Finishes the process."""
+    try:
+        state = session['state']
+        flow = Flow.from_client_secrets_file(
+            'credentials.json',
+            scopes=SCOPES,
+            state=state,
+            redirect_uri=url_for('oauth2callback', _external=True)
+        )
+        authorization_response = request.url
+        flow.fetch_token(authorization_response=authorization_response)
+        
+        credentials = flow.credentials
+        user_id = session.get('user_id')
+
+        if not user_id:
+            return "<h1>Authentication failed: User session not found.</h1>", 400
+
+        save_user_token(user_id, credentials.to_json())
+        
+        return "<h1>Authentication successful!</h1><p>You can now close this window and use the `!events` command in Discord.</p>"
+    except Exception as e:
+        print(f"An error occurred in the OAuth callback: {e}")
+        return "<h1>An error occurred during authentication.</h1><p>Please try again.</p>", 500
+
+# ==============================================================================
+# 5. BOT EVENTS
 # ==============================================================================
 @client.event
 async def on_ready():
     print(f'Success! We have logged in as {client.user}')
-    init_db() # Initialize the database when the bot starts
+    init_db()
 
 @client.event
 async def on_message(message):
     if message.author == client.user:
+        return
+
+    if message.content.startswith('!connect'):
+        # Generate the unique auth link for this user and send it in a DM
+        auth_url = url_for('connect_google', _external=True, user_id=message.author.id)
+        try:
+            await message.author.send(f"Please use this link to connect your Google Calendar: {auth_url}")
+            await message.channel.send(f"{message.author.mention}, I've sent you a private message with your connection link.")
+        except discord.Forbidden:
+            await message.channel.send(f"{message.author.mention}, I couldn't send you a DM. Please check your server privacy settings.")
         return
 
     if message.content.startswith('!events'):
@@ -127,10 +202,9 @@ async def on_message(message):
         service = get_calendar_service(user_id)
         
         if not service:
-            await message.channel.send("You haven't connected your Google Calendar yet! Please use a command to connect.")
+            await message.channel.send(f"You haven't connected your Google Calendar yet! Please use the `!connect` command.")
             return
 
-        # (Event fetching and formatting logic remains the same as before)
         try:
             now = datetime.datetime.utcnow().isoformat() + 'Z'
             events_result = service.events().list(calendarId='primary', timeMin=now,
@@ -138,7 +212,7 @@ async def on_message(message):
                                                 orderBy='startTime').execute()
             events = events_result.get('items', [])
         except Exception as e:
-            await message.channel.send("An error occurred while trying to fetch your calendar events.")
+            await message.channel.send(f"An error occurred while trying to fetch your calendar events: {e}")
             return
 
         if not events:
@@ -157,7 +231,8 @@ async def on_message(message):
         await message.channel.send(response)
 
 # ==============================================================================
-# 5. START THE BOT
+# 6. START THE BOT
 # ==============================================================================
 keep_alive()
 client.run(TOKEN)
+
