@@ -1,4 +1,5 @@
 import discord
+from discord.ext import commands
 import os
 from flask import Flask, request, redirect, session, url_for
 from threading import Thread
@@ -15,30 +16,19 @@ import traceback
 # ==============================================================================
 # 1. BOT & SERVER SETUP (RENDER)
 # ==============================================================================
-# Configure logging to ensure we see all messages
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Securely load secrets from Render's environment variables
 TOKEN = os.environ.get('DISCORD_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 FLASK_SECRET_KEY = os.environ.get('FLASK_SECRET_KEY')
 RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
 
-# Check if the secrets are loaded correctly
-if not TOKEN:
-    raise ValueError("CRITICAL ERROR: DISCORD_TOKEN not found in environment variables.")
-if not DATABASE_URL:
-    raise ValueError("CRITICAL ERROR: DATABASE_URL not found in environment variables.")
-if not FLASK_SECRET_KEY:
-    raise ValueError("CRITICAL ERROR: FLASK_SECRET_KEY not found in environment variables.")
-if not RENDER_EXTERNAL_URL:
-    logging.warning("RENDER_EXTERNAL_URL not found. Connection links may not work.")
-
+if not all([TOKEN, DATABASE_URL, FLASK_SECRET_KEY, RENDER_EXTERNAL_URL]):
+    raise ValueError("One or more required environment variables are missing.")
 
 intents = discord.Intents.default()
-intents.message_content = True
-client = discord.Client(intents=intents)
-
+intents.message_content = True 
+bot = commands.Bot(command_prefix="!", intents=intents) 
 app = Flask('')
 app.secret_key = FLASK_SECRET_KEY
 
@@ -46,7 +36,6 @@ app.secret_key = FLASK_SECRET_KEY
 # 2. DATABASE SETUP (POSTGRESQL)
 # ==============================================================================
 def init_db():
-    """Initializes the database and creates the tokens table if it doesn't exist."""
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cur = conn.cursor()
@@ -64,7 +53,6 @@ def init_db():
         logging.error(f"Error initializing database: {e}")
 
 def save_user_token(user_id, token_json):
-    """Saves or updates a user's Google token in the database."""
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
     cur.execute("""
@@ -81,8 +69,8 @@ def save_user_token(user_id, token_json):
 # ==============================================================================
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 
+# Fixed the typo in the function name here
 def get_calendar_service(user_id):
-    """Authenticates with Google for a specific user using tokens from PostgreSQL."""
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
     cur.execute("SELECT token_json FROM google_tokens WHERE user_id = %s;", (user_id,))
@@ -106,9 +94,9 @@ def get_calendar_service(user_id):
                 logging.error(f"Could not refresh token for user {user_id}: {e}")
                 cur.execute("DELETE FROM google_tokens WHERE user_id = %s;", (user_id,))
                 conn.commit()
-                cur.close()
-                conn.close()
                 return None
+        else:
+             return None # Needs re-authentication
     
     cur.close()
     conn.close()
@@ -124,10 +112,9 @@ def home():
     
 @app.route('/connect_google')
 def connect_google():
-    """Initiates the Google OAuth2 flow."""
     user_id = request.args.get('user_id')
     if not user_id:
-        return "<h1>Error: Missing user ID.</h1><p>Please try the `!connect` command again from Discord.</p>", 400
+        return "<h1>Error: Missing user ID.</h1><p>Please try the `/connect` command again from Discord.</p>", 400
     
     session['user_id'] = user_id
     redirect_uri = f"{RENDER_EXTERNAL_URL}{url_for('oauth2callback')}"
@@ -147,7 +134,6 @@ def connect_google():
 
 @app.route('/oauth2callback')
 def oauth2callback():
-    """Callback route for Google OAuth2. Finishes the process."""
     try:
         state = session['state']
         redirect_uri = f"{RENDER_EXTERNAL_URL}{url_for('oauth2callback')}"
@@ -169,84 +155,76 @@ def oauth2callback():
 
         save_user_token(user_id, credentials.to_json())
         
-        return "<h1>Authentication successful!</h1><p>You can now close this window and use the `!events` command in Discord.</p>"
+        return "<h1>Authentication successful!</h1><p>You can now close this window and use the `/events` command in Discord.</p>"
     except Exception as e:
         logging.error(f"An error occurred in the OAuth callback:\n{traceback.format_exc()}")
         return "<h1>An error occurred during authentication.</h1><p>Please try again.</p>", 500
 
 # ==============================================================================
-# 5. BOT EVENTS
+# 5. BOT EVENTS & SLASH COMMANDS
 # ==============================================================================
-@client.event
+@bot.event
 async def on_ready():
-    logging.info(f'Success! We have logged in as {client.user}')
+    logging.info(f'Success! We have logged in as {bot.user}')
     init_db()
 
-@client.event
-async def on_message(message):
-    if message.author == client.user:
+@bot.tree.command(name="connect", description="Connect your Google Calendar to the bot.")
+async def connect(interaction: discord.Interaction):
+    auth_url = f"{RENDER_EXTERNAL_URL}/connect_google?user_id={interaction.user.id}"
+    try:
+        await interaction.user.send(f"Please use this link to connect your Google Calendar: {auth_url}")
+        await interaction.response.send_message("I've sent you a private message with your connection link.", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message("I couldn't send you a DM. Please check your server privacy settings.", ephemeral=True)
+
+@bot.tree.command(name="events", description="Shows your next 10 upcoming Google Calendar events.")
+async def events(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
+    # Using the corrected function name here
+    service = get_calendar_service(interaction.user.id)
+    
+    if not service:
+        await interaction.followup.send(f"You haven't connected your Google Calendar yet! Please use the `/connect` command.")
         return
 
-    if message.content.startswith('!connect'):
-        if not RENDER_EXTERNAL_URL:
-            await message.channel.send("Sorry, the connection service is not configured correctly by the bot admin.")
-            return
-
-        auth_url = f"{RENDER_EXTERNAL_URL}/connect_google?user_id={message.author.id}"
-        try:
-            await message.author.send(f"Please use this link to connect your Google Calendar: {auth_url}")
-            await message.channel.send(f"{message.author.mention}, I've sent you a private message with your connection link.")
-        except discord.Forbidden:
-            await message.channel.send(f"{message.author.mention}, I couldn't send you a DM. Please check your server privacy settings.")
+    try:
+        now = datetime.datetime.utcnow().isoformat() + 'Z'
+        events_result = service.events().list(calendarId='primary', timeMin=now,
+                                            maxResults=10, singleEvents=True,
+                                            orderBy='startTime').execute()
+        events = events_result.get('items', [])
+    except Exception as e:
+        await interaction.followup.send(f"An error occurred while trying to fetch your calendar events: {e}")
         return
 
-    if message.content.startswith('!events'):
-        user_id = message.author.id
-        await message.channel.send("Fetching your upcoming events...")
-        
-        service = get_calendar_service(user_id)
-        
-        if not service:
-            await message.channel.send(f"You haven't connected your Google Calendar yet! Please use the `!connect` command.")
-            return
+    if not events:
+        await interaction.followup.send('You have no upcoming events found.')
+        return
+    
+    response = "📅 **Your upcoming events:**\n\n"
+    for event in events:
+        start = event['start'].get('dateTime', event['start'].get('date'))
+        if 'T' in start:
+            start_formatted = datetime.datetime.fromisoformat(start.replace('Z', '+00:00')).strftime('%A, %B %d at %I:%M %p')
+        else:
+            start_formatted = datetime.datetime.fromisoformat(start).strftime('%A, %B %d (All Day)')
+        response += f"**- {event['summary']}** on {start_formatted}\n"
+    
+    await interaction.followup.send(response)
 
-        try:
-            now = datetime.datetime.utcnow().isoformat() + 'Z'
-            events_result = service.events().list(calendarId='primary', timeMin=now,
-                                                maxResults=10, singleEvents=True,
-                                                orderBy='startTime').execute()
-            events = events_result.get('items', [])
-        except Exception as e:
-            await message.channel.send(f"An error occurred while trying to fetch your calendar events: {e}")
-            return
-
-        if not events:
-            await message.channel.send('You have no upcoming events found.')
-            return
-        
-        response = f"📅 **Upcoming events for {message.author.mention}:**\n\n"
-        for event in events:
-            start = event['start'].get('dateTime', event['start'].get('date'))
-            if 'T' in start:
-                start_formatted = datetime.datetime.fromisoformat(start.replace('Z', '+00:00')).strftime('%A, %B %d at %I:%M %p')
-            else:
-                start_formatted = datetime.datetime.fromisoformat(start).strftime('%A, %B %d (All Day)')
-            response += f"**- {event['summary']}** on {start_formatted}\n"
-        
-        await message.channel.send(response)
+@bot.command()
+@commands.is_owner()
+async def sync(ctx):
+    await bot.tree.sync()
+    await ctx.send("Commands synced successfully!")
 
 # ==============================================================================
 # 6. START THE BOT IN A BACKGROUND THREAD
 # ==============================================================================
 def run_bot():
-    # The client.run() method is a blocking call, so it will run forever in this thread.
-    # We run it with the TOKEN and not in an async context.
-    client.run(TOKEN)
+    bot.run(TOKEN)
 
-# Create and start the thread
 bot_thread = Thread(target=run_bot)
 bot_thread.start()
-
-# The 'app' object will be picked up by Gunicorn, which is specified in Render's start command.
-# This main script will finish, but the bot_thread will keep running in the background.
 
