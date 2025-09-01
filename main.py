@@ -9,7 +9,6 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 import psycopg2
-from dotenv import load_dotenv
 import logging
 import traceback
 
@@ -18,8 +17,6 @@ import traceback
 # ==============================================================================
 # Configure logging to ensure we see all messages
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-load_dotenv()
 
 # Securely load secrets from Render's environment variables
 TOKEN = os.environ.get('DISCORD_TOKEN')
@@ -44,15 +41,6 @@ client = discord.Client(intents=intents)
 
 app = Flask('')
 app.secret_key = FLASK_SECRET_KEY
-
-@app.route('/')
-def home():
-    return "Bot is alive!"
-def run():
-    app.run(host='0.0.0.0', port=8080)
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
 
 # ==============================================================================
 # 2. DATABASE SETUP (POSTGRESQL)
@@ -130,6 +118,10 @@ def get_calendar_service(user_id):
 # ==============================================================================
 # 4. WEB ROUTES FOR OAUTH
 # ==============================================================================
+@app.route('/')
+def home():
+    return "Bot is alive!"
+    
 @app.route('/connect_google')
 def connect_google():
     """Initiates the Google OAuth2 flow."""
@@ -179,7 +171,6 @@ def oauth2callback():
         
         return "<h1>Authentication successful!</h1><p>You can now close this window and use the `!events` command in Discord.</p>"
     except Exception as e:
-        # This will now log the FULL traceback to the Render logs
         logging.error(f"An error occurred in the OAuth callback:\n{traceback.format_exc()}")
         return "<h1>An error occurred during authentication.</h1><p>Please try again.</p>", 500
 
@@ -245,8 +236,17 @@ async def on_message(message):
         await message.channel.send(response)
 
 # ==============================================================================
-# 6. START THE BOT
+# 6. START THE BOT IN A BACKGROUND THREAD
 # ==============================================================================
-keep_alive()
-client.run(TOKEN)
+def run_bot():
+    # The client.run() method is a blocking call, so it will run forever in this thread.
+    # We run it with the TOKEN and not in an async context.
+    client.run(TOKEN)
+
+# Create and start the thread
+bot_thread = Thread(target=run_bot)
+bot_thread.start()
+
+# The 'app' object will be picked up by Gunicorn, which is specified in Render's start command.
+# This main script will finish, but the bot_thread will keep running in the background.
 
