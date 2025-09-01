@@ -40,7 +40,6 @@ pycparser==2.22
 pycryptodomex==3.23.0
 pyparsing==3.2.3
 pyseto==1.8.4
-replit==4.1.2
 requests==2.32.5
 requests-oauthlib==2.0.0
 rsa==4.9.1
