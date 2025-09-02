@@ -12,6 +12,7 @@ from googleapiclient.discovery import build
 import psycopg2
 import logging
 import traceback
+import dateparser # <-- New import for parsing dates
 
 # ==============================================================================
 # 1. BOT & SERVER SETUP (RENDER)
@@ -67,9 +68,9 @@ def save_user_token(user_id, token_json):
 # ==============================================================================
 # 3. GOOGLE CALENDAR SETUP (MULTI-USER WITH POSTGRESQL)
 # ==============================================================================
+# UPDATED SCOPE FOR READ/WRITE ACCESS
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 
-# Fixed the typo in the function name here
 def get_calendar_service(user_id):
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
@@ -155,7 +156,7 @@ def oauth2callback():
 
         save_user_token(user_id, credentials.to_json())
         
-        return "<h1>Authentication successful!</h1><p>You can now close this window and use the `/events` command in Discord.</p>"
+        return "<h1>Authentication successful!</h1><p>Your calendar is now connected with updated permissions. You can close this window.</p>"
     except Exception as e:
         logging.error(f"An error occurred in the OAuth callback:\n{traceback.format_exc()}")
         return "<h1>An error occurred during authentication.</h1><p>Please try again.</p>", 500
@@ -167,8 +168,13 @@ def oauth2callback():
 async def on_ready():
     logging.info(f'Success! We have logged in as {bot.user}')
     init_db()
+    try:
+        synced = await bot.tree.sync()
+        logging.info(f"Synced {len(synced)} command(s)")
+    except Exception as e:
+        logging.error(f"Failed to sync commands: {e}")
 
-@bot.tree.command(name="connect", description="Connect your Google Calendar to the bot.")
+@bot.tree.command(name="connect", description="Connect or re-authorize your Google Calendar.")
 async def connect(interaction: discord.Interaction):
     auth_url = f"{RENDER_EXTERNAL_URL}/connect_google?user_id={interaction.user.id}"
     try:
@@ -181,7 +187,6 @@ async def connect(interaction: discord.Interaction):
 async def events(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     
-    # Using the corrected function name here
     service = get_calendar_service(interaction.user.id)
     
     if not service:
@@ -213,11 +218,48 @@ async def events(interaction: discord.Interaction):
     
     await interaction.followup.send(response)
 
-@bot.command()
-@commands.is_owner()
-async def sync(ctx):
-    await bot.tree.sync()
-    await ctx.send("Commands synced successfully!")
+# NEW COMMAND TO ADD EVENTS
+@bot.tree.command(name="addevent", description="Adds a new event to your primary Google Calendar.")
+async def addevent(interaction: discord.Interaction, name: str, when: str, duration_minutes: int = 60):
+    await interaction.response.defer(ephemeral=True)
+
+    service = get_calendar_service(interaction.user.id)
+    if not service:
+        await interaction.followup.send("You need to connect your calendar first using `/connect`.")
+        return
+
+    # Use dateparser to understand the user's time input
+    start_time = dateparser.parse(when)
+    if not start_time:
+        await interaction.followup.send("Sorry, I couldn't understand that date and time. Please try again (e.g., 'tomorrow at 3pm' or 'September 5th 10am').")
+        return
+
+    end_time = start_time + datetime.timedelta(minutes=duration_minutes)
+
+    # Format for Google Calendar API
+    start_iso = start_time.isoformat()
+    end_iso = end_time.isoformat()
+
+    event = {
+        'summary': name,
+        'start': {
+            'dateTime': start_iso,
+            'timeZone': 'UTC', # It's best practice to use UTC
+        },
+        'end': {
+            'dateTime': end_iso,
+            'timeZone': 'UTC',
+        },
+    }
+
+    try:
+        created_event = service.events().insert(calendarId='primary', body=event).execute()
+        event_link = created_event.get('htmlLink')
+        await interaction.followup.send(f"✅ Event created successfully! You can view it here: {event_link}")
+    except Exception as e:
+        logging.error(f"Failed to create event for user {interaction.user.id}: {e}")
+        await interaction.followup.send("Sorry, an error occurred while creating the event.")
+
 
 # ==============================================================================
 # 6. START THE BOT IN A BACKGROUND THREAD
