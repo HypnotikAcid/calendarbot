@@ -67,7 +67,7 @@ def save_user_token(user_id, token_json):
 # ==============================================================================
 # 3. GOOGLE CALENDAR SETUP (MULTI-USER WITH POSTGRESQL)
 # ==============================================================================
-SCOPES = ['https://www.googleapis.com/auth/calendar.readonly']
+SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 # Fixed the typo in the function name here
 def get_calendar_service(user_id):
