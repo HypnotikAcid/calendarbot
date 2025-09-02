@@ -12,7 +12,8 @@ from googleapiclient.discovery import build
 import psycopg2
 import logging
 import traceback
-import dateparser # <-- New import for parsing dates
+import dateparser
+import asyncio # <-- New import for running blocking code in the background
 
 # ==============================================================================
 # 1. BOT & SERVER SETUP (RENDER)
@@ -68,7 +69,6 @@ def save_user_token(user_id, token_json):
 # ==============================================================================
 # 3. GOOGLE CALENDAR SETUP (MULTI-USER WITH POSTGRESQL)
 # ==============================================================================
-# UPDATED SCOPE FOR READ/WRITE ACCESS
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 def get_calendar_service(user_id):
@@ -187,79 +187,84 @@ async def connect(interaction: discord.Interaction):
 async def events(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     
-    service = get_calendar_service(interaction.user.id)
-    
-    if not service:
-        await interaction.followup.send(f"You haven't connected your Google Calendar yet! Please use the `/connect` command.")
-        return
-
     try:
+        # Run the blocking database call in a separate thread
+        service = await asyncio.to_thread(get_calendar_service, interaction.user.id)
+        
+        if not service:
+            await interaction.followup.send(f"You haven't connected your Google Calendar yet! Please use the `/connect` command.")
+            return
+
         now = datetime.datetime.utcnow().isoformat() + 'Z'
-        events_result = service.events().list(calendarId='primary', timeMin=now,
-                                            maxResults=10, singleEvents=True,
-                                            orderBy='startTime').execute()
+        
+        # Run the blocking Google API call in a separate thread
+        events_result = await asyncio.to_thread(
+            service.events().list(
+                calendarId='primary', timeMin=now,
+                maxResults=10, singleEvents=True,
+                orderBy='startTime'
+            ).execute
+        )
+        
         events = events_result.get('items', [])
+
+        if not events:
+            await interaction.followup.send('You have no upcoming events found.')
+            return
+        
+        response = "📅 **Your upcoming events:**\n\n"
+        for event in events:
+            start = event['start'].get('dateTime', event['start'].get('date'))
+            if 'T' in start:
+                start_formatted = datetime.datetime.fromisoformat(start.replace('Z', '+00:00')).strftime('%A, %B %d at %I:%M %p')
+            else:
+                start_formatted = datetime.datetime.fromisoformat(start).strftime('%A, %B %d (All Day)')
+            response += f"**- {event['summary']}** on {start_formatted}\n"
+        
+        await interaction.followup.send(response)
+
     except Exception as e:
-        await interaction.followup.send(f"An error occurred while trying to fetch your calendar events: {e}")
-        return
+        logging.error(f"An error occurred in the /events command:\n{traceback.format_exc()}")
+        await interaction.followup.send(f"An error occurred while trying to fetch your calendar events.")
 
-    if not events:
-        await interaction.followup.send('You have no upcoming events found.')
-        return
-    
-    response = "📅 **Your upcoming events:**\n\n"
-    for event in events:
-        start = event['start'].get('dateTime', event['start'].get('date'))
-        if 'T' in start:
-            start_formatted = datetime.datetime.fromisoformat(start.replace('Z', '+00:00')).strftime('%A, %B %d at %I:%M %p')
-        else:
-            start_formatted = datetime.datetime.fromisoformat(start).strftime('%A, %B %d (All Day)')
-        response += f"**- {event['summary']}** on {start_formatted}\n"
-    
-    await interaction.followup.send(response)
-
-# NEW COMMAND TO ADD EVENTS
 @bot.tree.command(name="addevent", description="Adds a new event to your primary Google Calendar.")
 async def addevent(interaction: discord.Interaction, name: str, when: str, duration_minutes: int = 60):
     await interaction.response.defer(ephemeral=True)
 
-    service = get_calendar_service(interaction.user.id)
-    if not service:
-        await interaction.followup.send("You need to connect your calendar first using `/connect`.")
-        return
-
-    # Use dateparser to understand the user's time input
-    start_time = dateparser.parse(when)
-    if not start_time:
-        await interaction.followup.send("Sorry, I couldn't understand that date and time. Please try again (e.g., 'tomorrow at 3pm' or 'September 5th 10am').")
-        return
-
-    end_time = start_time + datetime.timedelta(minutes=duration_minutes)
-
-    # Format for Google Calendar API
-    start_iso = start_time.isoformat()
-    end_iso = end_time.isoformat()
-
-    event = {
-        'summary': name,
-        'start': {
-            'dateTime': start_iso,
-            'timeZone': 'UTC', # It's best practice to use UTC
-        },
-        'end': {
-            'dateTime': end_iso,
-            'timeZone': 'UTC',
-        },
-    }
-
     try:
-        created_event = service.events().insert(calendarId='primary', body=event).execute()
+        # Run the blocking database call in a separate thread
+        service = await asyncio.to_thread(get_calendar_service, interaction.user.id)
+        if not service:
+            await interaction.followup.send("You need to connect your calendar first using `/connect`.")
+            return
+
+        # Run the blocking date parsing in a separate thread
+        start_time = await asyncio.to_thread(dateparser.parse, when)
+        if not start_time:
+            await interaction.followup.send("Sorry, I couldn't understand that date and time. Please try again (e.g., 'tomorrow at 3pm').")
+            return
+
+        end_time = start_time + datetime.timedelta(minutes=duration_minutes)
+        start_iso = start_time.isoformat()
+        end_iso = end_time.isoformat()
+
+        event = {
+            'summary': name,
+            'start': {'dateTime': start_iso, 'timeZone': 'UTC'},
+            'end': {'dateTime': end_iso, 'timeZone': 'UTC'},
+        }
+
+        # Run the blocking Google API call in a separate thread
+        created_event = await asyncio.to_thread(
+            service.events().insert(calendarId='primary', body=event).execute
+        )
+        
         event_link = created_event.get('htmlLink')
         await interaction.followup.send(f"✅ Event created successfully! You can view it here: {event_link}")
+        
     except Exception as e:
-        logging.error(f"Failed to create event for user {interaction.user.id}: {e}")
+        logging.error(f"Failed to create event for user {interaction.user.id}:\n{traceback.format_exc()}")
         await interaction.followup.send("Sorry, an error occurred while creating the event.")
-
 
 # ==============================================================================
 # 6. START THE BOT IN A BACKGROUND THREAD
