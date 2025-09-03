@@ -24,10 +24,10 @@ TOKEN = os.environ.get('DISCORD_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 FLASK_SECRET_KEY = os.environ.get('FLASK_SECRET_KEY')
 RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
+BOT_OWNER_ID = os.environ.get('BOT_OWNER_ID') # Using owner ID for the sync command
 
-# BOT_OWNER_ID is no longer needed for this version
-if not all([TOKEN, DATABASE_URL, FLASK_SECRET_KEY, RENDER_EXTERNAL_URL]):
-    raise ValueError("One or more required environment variables are missing.")
+if not all([TOKEN, DATABASE_URL, FLASK_SECRET_KEY, RENDER_EXTERNAL_URL, BOT_OWNER_ID]):
+    raise ValueError("One or more required environment variables are missing. Ensure BOT_OWNER_ID is set.")
 
 intents = discord.Intents.default()
 intents.message_content = True 
@@ -157,7 +157,7 @@ def oauth2callback():
 
         save_user_token(user_id, credentials.to_json())
         
-        return "<h1>Authentication successful!</h1><p>Your calendar is now connected with updated permissions. You can close this window.</p>"
+        return "<h1>Authentication successful!</h1><p>Your calendar is now connected. You can close this window.</p>"
     except Exception as e:
         logging.error(f"An error occurred in the OAuth callback:\n{traceback.format_exc()}")
         return "<h1>An error occurred during authentication.</h1><p>Please try again.</p>", 500
@@ -169,12 +169,6 @@ def oauth2callback():
 async def on_ready():
     logging.info(f'Success! We have logged in as {bot.user}')
     init_db()
-    # Reverted to automatic syncing on startup.
-    try:
-        synced = await bot.tree.sync()
-        logging.info(f"Synced {len(synced)} command(s)")
-    except Exception as e:
-        logging.error(f"Failed to sync commands: {e}")
 
 @bot.tree.command(name="connect", description="Connect or re-authorize your Google Calendar.")
 async def connect(interaction: discord.Interaction):
@@ -265,7 +259,21 @@ async def addevent(interaction: discord.Interaction, name: str, when: str, durat
         logging.error(f"Failed to create event for user {interaction.user.id}:\n{traceback.format_exc()}")
         await interaction.followup.send("Sorry, an error occurred while creating the event.")
 
-# The manual sync command has been removed.
+# A special command for the bot owner to sync commands manually.
+@bot.tree.command(name="sync", description="Owner only: Syncs the command tree.")
+async def sync(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if str(interaction.user.id) != BOT_OWNER_ID:
+        await interaction.followup.send("Sorry, this command is restricted to the bot owner.")
+        return
+
+    try:
+        synced = await bot.tree.sync()
+        logging.info(f"Manually synced {len(synced)} command(s).")
+        await interaction.followup.send(f"Synced {len(synced)} command(s).")
+    except Exception as e:
+        logging.error(f"Failed to manually sync commands: {e}")
+        await interaction.followup.send(f"Failed to sync commands: {e}")
 
 # ==============================================================================
 # 6. START THE BOT IN A BACKGROUND THREAD
