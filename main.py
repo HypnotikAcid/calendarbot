@@ -13,7 +13,7 @@ import psycopg2
 import logging
 import traceback
 import dateparser
-import asyncio # <-- New import for running blocking code in the background
+import asyncio
 
 # ==============================================================================
 # 1. BOT & SERVER SETUP (RENDER)
@@ -168,27 +168,24 @@ def oauth2callback():
 async def on_ready():
     logging.info(f'Success! We have logged in as {bot.user}')
     init_db()
-    try:
-        synced = await bot.tree.sync()
-        logging.info(f"Synced {len(synced)} command(s)")
-    except Exception as e:
-        logging.error(f"Failed to sync commands: {e}")
+    # We no longer sync automatically to prevent rate-limiting on restarts.
 
 @bot.tree.command(name="connect", description="Connect or re-authorize your Google Calendar.")
 async def connect(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
     auth_url = f"{RENDER_EXTERNAL_URL}/connect_google?user_id={interaction.user.id}"
     try:
         await interaction.user.send(f"Please use this link to connect your Google Calendar: {auth_url}")
-        await interaction.response.send_message("I've sent you a private message with your connection link.", ephemeral=True)
+        await interaction.followup.send("I've sent you a private message with your connection link.")
     except discord.Forbidden:
-        await interaction.response.send_message("I couldn't send you a DM. Please check your server privacy settings.", ephemeral=True)
+        await interaction.followup.send("I couldn't send you a DM. Please check your server privacy settings.")
 
 @bot.tree.command(name="events", description="Shows your next 10 upcoming Google Calendar events.")
 async def events(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     
     try:
-        # Run the blocking database call in a separate thread
         service = await asyncio.to_thread(get_calendar_service, interaction.user.id)
         
         if not service:
@@ -197,7 +194,6 @@ async def events(interaction: discord.Interaction):
 
         now = datetime.datetime.utcnow().isoformat() + 'Z'
         
-        # Run the blocking Google API call in a separate thread
         events_result = await asyncio.to_thread(
             service.events().list(
                 calendarId='primary', timeMin=now,
@@ -232,13 +228,11 @@ async def addevent(interaction: discord.Interaction, name: str, when: str, durat
     await interaction.response.defer(ephemeral=True)
 
     try:
-        # Run the blocking database call in a separate thread
         service = await asyncio.to_thread(get_calendar_service, interaction.user.id)
         if not service:
             await interaction.followup.send("You need to connect your calendar first using `/connect`.")
             return
 
-        # Run the blocking date parsing in a separate thread
         start_time = await asyncio.to_thread(dateparser.parse, when)
         if not start_time:
             await interaction.followup.send("Sorry, I couldn't understand that date and time. Please try again (e.g., 'tomorrow at 3pm').")
@@ -254,7 +248,6 @@ async def addevent(interaction: discord.Interaction, name: str, when: str, durat
             'end': {'dateTime': end_iso, 'timeZone': 'UTC'},
         }
 
-        # Run the blocking Google API call in a separate thread
         created_event = await asyncio.to_thread(
             service.events().insert(calendarId='primary', body=event).execute
         )
@@ -265,6 +258,21 @@ async def addevent(interaction: discord.Interaction, name: str, when: str, durat
     except Exception as e:
         logging.error(f"Failed to create event for user {interaction.user.id}:\n{traceback.format_exc()}")
         await interaction.followup.send("Sorry, an error occurred while creating the event.")
+
+# NEW special command for the bot owner to sync commands manually.
+# This will be hidden and only usable by the owner of the bot application.
+@bot.tree.command(name="sync", description="Owner only: Syncs the command tree.")
+@commands.is_owner()
+async def sync(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        synced = await bot.tree.sync()
+        logging.info(f"Manually synced {len(synced)} command(s).")
+        await interaction.followup.send(f"Synced {len(synced)} command(s).")
+    except Exception as e:
+        logging.error(f"Failed to manually sync commands: {e}")
+        await interaction.followup.send(f"Failed to sync commands: {e}")
+
 
 # ==============================================================================
 # 6. START THE BOT IN A BACKGROUND THREAD
