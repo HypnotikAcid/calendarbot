@@ -25,6 +25,7 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 FLASK_SECRET_KEY = os.environ.get('FLASK_SECRET_KEY')
 RENDER_EXTERNAL_URL = os.environ.get('RENDER_EXTERNAL_URL')
 
+# BOT_OWNER_ID is no longer needed for this version
 if not all([TOKEN, DATABASE_URL, FLASK_SECRET_KEY, RENDER_EXTERNAL_URL]):
     raise ValueError("One or more required environment variables are missing.")
 
@@ -168,7 +169,12 @@ def oauth2callback():
 async def on_ready():
     logging.info(f'Success! We have logged in as {bot.user}')
     init_db()
-    # We no longer sync automatically to prevent rate-limiting on restarts.
+    # Reverted to automatic syncing on startup.
+    try:
+        synced = await bot.tree.sync()
+        logging.info(f"Synced {len(synced)} command(s)")
+    except Exception as e:
+        logging.error(f"Failed to sync commands: {e}")
 
 @bot.tree.command(name="connect", description="Connect or re-authorize your Google Calendar.")
 async def connect(interaction: discord.Interaction):
@@ -259,20 +265,7 @@ async def addevent(interaction: discord.Interaction, name: str, when: str, durat
         logging.error(f"Failed to create event for user {interaction.user.id}:\n{traceback.format_exc()}")
         await interaction.followup.send("Sorry, an error occurred while creating the event.")
 
-# NEW special command for the bot owner to sync commands manually.
-# This will be hidden and only usable by the owner of the bot application.
-@bot.tree.command(name="sync", description="Owner only: Syncs the command tree.")
-@commands.is_owner()
-async def sync(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    try:
-        synced = await bot.tree.sync()
-        logging.info(f"Manually synced {len(synced)} command(s).")
-        await interaction.followup.send(f"Synced {len(synced)} command(s).")
-    except Exception as e:
-        logging.error(f"Failed to manually sync commands: {e}")
-        await interaction.followup.send(f"Failed to sync commands: {e}")
-
+# The manual sync command has been removed.
 
 # ==============================================================================
 # 6. START THE BOT IN A BACKGROUND THREAD
